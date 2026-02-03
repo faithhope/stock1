@@ -3,7 +3,7 @@ name: Stock Analysis Bot
 on:
   schedule:
     # 깃허브 서버 시간(UTC) 기준입니다. 한국 시간 오후 3시 40분 = UTC 06시 40분
-    - cron: '40 6 * * *'
+    - cron: '0 1 * * 1-5'
   workflow_dispatch: # 우리가 필요할 때 수동으로 버튼 눌러 실행할 수 있게 함
 
 jobs:
