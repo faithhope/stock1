@@ -47,29 +47,24 @@ try:
     
     for i, row in top_stocks.iterrows():
         try:
-            # 1. 최근 10일치 데이터를 넉넉히 가져옵니다.
+            # 1. 최근 10일치 데이터를 가져오되, 값이 0이 아닌 가장 최근 날짜를 찾습니다.
             df_invest = fdr.DataReader(row['Code'], start_date)
             
-            # 2. 'Foreign'이나 'Institution' 컬럼이 0이 아닌 마지막 날을 찾습니다.
-            # 장 중에는 오늘 데이터가 0일 수 있으므로, 실제 값이 있는 마지막 영업일 데이터를 추출합니다.
-            valid_invest = df_invest[df_invest['Foreign'] != 0].tail(1)
+            # 2. 외인/기관 합계가 0이 아닌 유효한 마지막 행 추출 (전일 확정치)
+            valid_invest = df_invest[(df_invest['Foreign'] != 0) | (df_invest['Institution'] != 0)].tail(1)
             
-            # 만약 오늘 데이터가 0이라면 바로 전일 데이터를 사용하게 됩니다.
             if not valid_invest.empty:
                 frn = int(valid_invest['Foreign'].iloc[0])
                 inst = int(valid_invest['Institution'].iloc[0])
-                # 수급이 집계된 날짜 (예: 2024-05-20)
-                invest_date = valid_invest.index[0].strftime('%m/%d')
+                f_icon, i_icon = ("🔵" if frn > 0 else "⚪"), ("🟠" if inst > 0 else "⚪")
+                date_str = valid_invest.index[0].strftime('%m/%d') # 데이터 기준 날짜
             else:
-                frn, inst, invest_date = 0, 0, "미집계"
-
-            f_icon, i_icon = ("🔵" if frn > 0 else "⚪"), ("🟠" if inst > 0 else "⚪")
+                frn, inst, f_icon, i_icon, date_str = 0, 0, "❓", "❓", "N/A"
         except:
-            frn, inst, invest_date, f_icon, i_icon = 0, 0, "N/A", "❓", "❓"
+            frn, inst, f_icon, i_icon, date_str = 0, 0, "❓", "❓", "N/A"
 
         amt_billion = round(row['Amount'] / 100000000) if row['Amount'] else 0
-        
-        report += f"<b>{row['StockName']}</b> ({invest_date} 수급)\n"
+        report += f"<b>{row['StockName']}</b> ({date_str} 수급)\n" # 날짜 표시 추가
         report += f"{int(row['Close']):,}({row['Rate']}%) | {amt_billion}억\n"
         report += f"{f_icon}외:{frn:,} / {i_icon}기:{inst:,}\n\n"
         time.sleep(0.1)
@@ -82,4 +77,5 @@ try:
 
 except Exception as e:
     send_telegram_msg(f"❌ 클라우드 에러 발생: {e}")
+
 
