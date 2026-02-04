@@ -8,84 +8,69 @@ from datetime import datetime, timedelta
 def send_telegram_msg(message):
     token = os.environ.get('TELEGRAM_TOKEN')
     chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    if not token or not chat_id: return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     data = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-    try:
-        requests.post(url, data=data)
-    except Exception as e:
-        print(f"전송 오류: {e}")
+    requests.post(url, data=data)
 
-# 1. 주도 업종(섹터) 분석 함수
-def get_leading_sectors():
-    df_desc = fdr.StockListing('KRX-DESC')
-    df_all = fdr.StockListing('KRX')
+try:
+    # 1. 기초 데이터 로드
+    df_desc = fdr.StockListing('KRX-DESC') # 섹터 정보
+    df_all = fdr.StockListing('KRX')      # 현재 시세 정보
     
-    # 등락률 컬럼명 찾기 (ChgRate 또는 Ratio)
-    rate_col = [col for col in df_all.columns if 'Rate' in col or 'Ratio' in col][0]
+    # [보정] 컬럼명에서 공백 제거 (가끔 'Name ' 처럼 들어오는 경우 방지)
+    df_all.columns = df_all.columns.str.strip()
+    df_desc.columns = df_desc.columns.str.strip()
+
+    # 2. 이름(Name) 컬럼 찾기 (유연한 대응)
+    name_col = next((c for c in ['Name', 'CodeName', '한글종목명'] if c in df_all.columns), None)
+    rate_col = next((c for c in ['ChgRate', 'Ratio', 'Rate', 'CmpRate'] if c in df_all.columns), None)
     
-    merged = df_desc.merge(df_all[['Code', rate_col]], on='Code')
-    sector_rank = merged.groupby('Sector')[rate_col].mean().sort_values(ascending=False)
-    return sector_rank.head(3)
+    if not name_col or not rate_col:
+        raise Exception(f"필수 컬럼 누락 (Name:{name_col}, Rate:{rate_col})")
 
-# 2. 메인 분석 시작
-sector_rank = get_leading_sectors()
-top_sector = sector_rank.index[0]
-
-# 현재 1위 업종 내 종목 추출
-df_desc = fdr.StockListing('KRX-DESC')
-sector_stocks = df_desc[df_desc['Sector'] == top_sector].copy()
-df_current = fdr.StockListing('KRX')
-merged_df = sector_stocks.merge(df_current, on='Code')
-
-# 거래대금 상위 10개 필터링
-top_stocks = merged_df.sort_values(by='Amount', ascending=False).head(10)
-
-# 리포트 헤더
-report = f"🔥 <b>주도 업종: [{top_sector}]</b>\n"
-report += f"업종 평균 등락: {sector_rank.iloc[0]:.2f}%\n"
-report += "--------------------------------\n"
-report += "<b>종목별 수급 (외인/기관)</b>\n\n"
-
-# 3. 개별 종목 수급 상세 분석
-# 데이터 수집 시작일 (최근 5일치 정도면 충분)
-start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-
-for i, row in top_stocks.iterrows():
-    code = row['Code']
-    name = row['Name']
+    # 3. 데이터 병합
+    # 필요한 컬럼만 추출하여 병합 (Code는 공통)
+    merged = df_desc.merge(df_all[['Code', name_col, rate_col, 'Amount', 'Close']], on='Code')
     
-    try:
-        # 투자자별 매매동향 가져오기
-        df_investors = fdr.DataReader(code, start_date).tail(1)
-        
-        # 컬럼 존재 여부 확인 후 데이터 추출
-        frn_net = int(df_investors['Foreign'].iloc[0]) if 'Foreign' in df_investors.columns else 0
-        inst_net = int(df_investors['Institution'].iloc[0]) if 'Institution' in df_investors.columns else 0
-        
-        # 수급 상태 이모지
-        frn_icon = "🔵" if frn_net > 0 else "⚪"
-        inst_icon = "🟠" if inst_net > 0 else "⚪"
-        
-    except Exception as e:
-        frn_net, inst_net = 0, 0
-        frn_icon, inst_icon = "❓", "❓"
-
-    amount_billion = round(row['Amount'] / 100000000)
-    rate_val = row.get('ChgRate', row.get('Ratio', 0))
+    # 4. 섹터 분석
+    sector_group = merged.groupby('Sector')[rate_col].mean()
+    sector_rank = sector_group.sort_values(ascending=False)
+    top_sector = sector_rank.index[0]
     
-    report += f"<b>{name}</b> ({code})\n"
-    report += f"현재: {int(row['Close']):,}({rate_val}%)\n"
-    report += f"거래대금: {amount_billion:,}억\n"
-    report += f"{frn_icon}외인: {frn_net:,} / {inst_icon}기관: {inst_net:,}\n\n"
+    # 5. 리포트 생성
+    top_stocks = merged[merged['Sector'] == top_sector].sort_values(by='Amount', ascending=False).head(10)
     
-    time.sleep(0.1) # API 부하 방지
+    report = f"🔥 <b>주도 업종: [{top_sector}]</b>\n"
+    report += f"업종 평균 등락: {sector_rank.iloc[0]:.2f}%\n"
+    report += "--------------------------------\n"
 
-# 리포트 푸터
-report += "--------------------------------\n"
-report += f"🥈 2위: {sector_rank.index[1]} ({sector_rank.iloc[1]:.2f}%)\n"
-report += f"🥉 3위: {sector_rank.index[2]} ({sector_rank.iloc[2]:.2f}%)\n"
-report += "<i>*수급은 전일 확정치 기준입니다.</i>"
+    start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+    
+    for i, row in top_stocks.iterrows():
+        # 수급 데이터 (실패해도 리포트 중단 안 함)
+        try:
+            df_invest = fdr.DataReader(row['Code'], start_date).tail(1)
+            frn = int(df_invest['Foreign'].iloc[0]) if 'Foreign' in df_invest.columns else 0
+            inst = int(df_invest['Institution'].iloc[0]) if 'Institution' in df_invest.columns else 0
+            f_icon, i_icon = ("🔵" if frn > 0 else "⚪"), ("🟠" if inst > 0 else "⚪")
+        except:
+            frn, inst, f_icon, i_icon = 0, 0, "❓", "❓"
 
-# 4. 전송
-send_telegram_msg(report)
-print(f"[{top_sector}] 분석 리포트 발송 완료")
+        amt = round(row['Amount'] / 100000000)
+        # 컬럼 변수를 사용하여 안전하게 접근
+        report += f"<b>{row[name_col]}</b>\n{int(row['Close']):,}({row[rate_col]}%) | {amt}억\n"
+        report += f"{f_icon}외:{frn:,} {i_icon}기:{inst:,}\n\n"
+        time.sleep(0.1)
+
+    report += "--------------------------------\n"
+    if len(sector_rank) > 2:
+        report += f"🥈 2위: {sector_rank.index[1]} | 🥉 3위: {sector_rank.index[2]}"
+    
+    send_telegram_msg(report)
+    print("성공적으로 전송되었습니다.")
+
+except Exception as e:
+    err_msg = f"❌ 에러 발생: {str(e)}"
+    print(err_log := err_msg)
+    send_telegram_msg(err_msg)
