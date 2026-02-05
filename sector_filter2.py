@@ -13,39 +13,38 @@ def send_telegram_msg(message):
     data = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     requests.post(url, data=data)
 
-# 섹터 키워드 매핑 (원하시는 대로 수정 가능)
 MY_SECTORS = {
     '반도체': '반도체',
     '조선': '선박',
-    '방산': '항공기',
+    '방산': '항공',
     '원전': '전기',
     '로봇': '기계',
     '자동차': '자동차'
 }
 
 try:
-    print("🚀 데이터 분석 시작...")
+    print("🚀 지표 강화 리포트 로드 중...")
+    
+    # 1. 섹터 정보 로드
     df_desc = fdr.StockListing('KRX-DESC')
-    df_all = fdr.StockListing('KRX')
+    
+    # 2. 투자지표가 포함된 마켓 데이터 로드 (이게 핵심입니다)
+    # KRX-MARCAP은 시총, PER, PBR 등이 포함된 일자별 데이터셋입니다.
+    df_all = fdr.StockListing('KRX-MARCAP') 
     df_all.columns = df_all.columns.str.strip()
 
-    # 1. 컬럼 존재 여부 확인 및 데이터 클렌징
-    # PER, PBR 컬럼이 없는 경우를 대비해 기본값 0으로 초기화된 컬럼 생성
-    for col in ['PER', 'PBR', 'Marcap', 'Amount']:
-        if col not in df_all.columns:
-            df_all[col] = 0  # 컬럼이 없으면 0으로 채운 컬럼 생성
-        else:
-            # 존재한다면 숫자형으로 변환 (하이픈 '-' 등 에러 방지)
+    # 3. 데이터 클렌징 (숫자 변환)
+    for col in ['PER', 'PBR', 'Marcap', 'Amount', 'Close', 'ChgRate']:
+        if col in df_all.columns:
             df_all[col] = pd.to_numeric(df_all[col], errors='coerce').fillna(0)
 
-    rate_col = next((c for c in df_all.columns if 'Ratio' in c or 'Rate' in c), 'ChgRate')
+    # 4. 데이터 병합
     merged = df_desc.merge(df_all, on='Code')
 
-    report = f"🎯 <b>섹터별 수급 및 지표 리포트</b>\n"
-    report += f"기준: {datetime.now().strftime('%m/%d %H:%M')}\n\n"
+    report = f"🎯 <b>핵심 지표 리포트 (PER/PBR 보완)</b>\n"
+    report += f"기준: {(datetime.utcnow() + timedelta(hours=9)).strftime('%m/%d %H:%M')}\n\n"
 
     for label, keyword in MY_SECTORS.items():
-        # 섹터 필터링 (keyword 포함 여부)
         filtered = merged[merged['Sector'].str.contains(keyword, na=False)]
         if filtered.empty: continue
         
@@ -53,31 +52,27 @@ try:
         top_5 = filtered.sort_values(by='Amount', ascending=False).head(5)
         
         report += f"<b>[ {label} ]</b>\n"
-        
         for _, row in top_5.iterrows():
-            # 병합 시 이름 중복 처리
             name = row.get('StockName') or row.get('Name_x') or row.get('Name')
             price = int(row['Close'])
-            rate = row[rate_col]
-            m_cap = round(row['Marcap'] / 1000000000000, 1) # 조 단위
+            rate = row.get('ChgRate', 0)
+            m_cap = round(row['Marcap'] / 1000000000000, 1)
             
-            # PER, PBR 표시 (0보다 큰 경우만 수치 표시, 아니면 N/A)
-            per_val = row['PER']
-            pbr_val = row['PBR']
-            per_str = f"{per_val:.1f}" if per_val > 0 else "N/A"
-            pbr_str = f"{pbr_val:.2f}" if pbr_val > 0 else "N/A"
+            # 지표 추출 및 포맷팅 (0이거나 NaN이면 N/A 표시)
+            per = row['PER']
+            pbr = row['PBR']
+            per_str = f"{per:.2f}" if per > 0.01 else "N/A"
+            pbr_str = f"{pbr:.2f}" if pbr > 0.01 else "N/A"
             
             report += f"• <b>{name}</b>\n"
-            report += f"  {price:,}원 ({rate}%) | 시총 {m_cap}조\n"
+            report += f"  {price:,}원 ({rate:+.2f}%) | 시총 {m_cap}조\n"
             report += f"  PER: {per_str} | PBR: {pbr_str}\n"
         
         report += "--------------------------------\n"
         time.sleep(0.1)
 
     send_telegram_msg(report)
-    print("✨ 전송 완료!")
+    print("성공")
 
 except Exception as e:
-    import traceback
-    print(traceback.format_exc())
-    send_telegram_msg(f"❌ 에러 발생: {str(e)}")
+    send_telegram_msg(f"❌ 지표 리포트 에러: {str(e)}")
