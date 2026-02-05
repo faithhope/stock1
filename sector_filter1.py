@@ -13,71 +13,54 @@ def send_telegram_msg(message):
     data = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
     requests.post(url, data=data)
 
+# 내가 보고 싶은 섹터 정의 (KRX-DESC 기준 키워드)
+MY_SECTORS = ['반도체', '조선', '방산', '원자력', '로봇', '자동차']
+
 try:
-    # 1. 기초 데이터 로드
+    print("데이터 수집 시작...")
     df_desc = fdr.StockListing('KRX-DESC')
-    df_all = fdr.StockListing('KRX') # 전 종목 시세 및 기본 수급 포함
+    df_all = fdr.StockListing('KRX')
     df_all.columns = df_all.columns.str.strip()
 
-    # 2. 컬럼 매핑 (클라우드 환경 대응)
-    rate_col = next((c for c in df_all.columns if 'Ratio' in c or 'Rate' in c), None)
-    amount_col = next((c for c in ['Amount', '거래대금'] if c in df_all.columns), 'Amount')
+    # 컬럼 매핑 (오타 대응 포함)
+    rate_col = next((c for c in df_all.columns if 'Ratio' in c or 'Rate' in c), 'ChgRate')
     
-    # 3. 데이터 병합 및 섹터 분석
-    df_all_sub = df_all[['Code', 'Name', rate_col, amount_col, 'Close']].copy()
-    df_all_sub.columns = ['Code', 'StockName', 'Rate', 'Amount', 'Close']
-    merged = df_desc.merge(df_all_sub, on='Code')
-    merged['Rate'] = pd.to_numeric(merged['Rate'], errors='coerce')
-    
-    sector_rank = merged.groupby('Sector')['Rate'].mean().sort_values(ascending=False)
-    top_sector = sector_rank.index[0]
+    # 데이터 병합 (시가총액, PER, PBR 등은 KRX 기본 데이터에 포함됨)
+    # Marcap: 시가총액, PER: PER, PBR: PBR
+    merged = df_desc.merge(df_all, on='Code')
 
-    # 4. 리포트 생성 시작
-    top_stocks = merged[merged['Sector'] == top_sector].sort_values(by='Amount', ascending=False).head(10)
-    
-    report = f"🚀 <b>클라우드 리포트: [{top_sector}]</b>\n"
-    report += f"평균 등락: {sector_rank.iloc[0]:.2f}%\n"
-    report += "--------------------------------\n"
+    report = f"📊 <b>관심 섹터별 수급 TOP 5</b>\n"
+    report += f"기준 시각: {datetime.now().strftime('%m/%d %H:%M')}\n\n"
 
-    # 5. 수급 데이터 보정 루프
-    # DataReader의 불안정성을 피하기 위해 어제(T-1) 데이터를 명시적으로 요청
-    target_date = (datetime.now() - timedelta(days=1))
-    if target_date.weekday() >= 5: # 주말이면 금요일로 후퇴
-        target_date -= timedelta(days=target_date.weekday() - 4)
-    date_str = target_date.strftime('%Y-%m-%d')
-
-    for i, row in top_stocks.iterrows():
-        try:
-            # 개별 종목 수급 상세 (실패 시 N/A 방지 로직)
-            # data_source를 'KRX'로 명시하여 안정성 확보
-            df_invest = fdr.DataReader(row['Code'], date_str, date_str)
+    for target in MY_SECTORS:
+        # 해당 키워드가 포함된 섹터 필터링
+        filtered = merged[merged['Sector'].str.contains(target, na=False)]
+        if filtered.empty: continue
+        
+        # 거래대금(Amount) 순으로 TOP 5 추출
+        top_5 = filtered.sort_values(by='Amount', ascending=False).head(5)
+        
+        report += f"<b>[ {target} ]</b>\n"
+        
+        for _, row in top_5.iterrows():
+            name = row['Name_x'] if 'Name_x' in row else row['Name']
+            price = int(row['Close'])
+            rate = row[rate_col]
+            # 시총(Marcap)은 보통 '원' 단위이므로 조 단위로 변환
+            m_cap = round(row['Marcap'] / 1000000000000, 1) if 'Marcap' in row else 0
+            per = row.get('PER', 'N/A')
+            pbr = row.get('PBR', 'N/A')
             
-            if not df_invest.empty:
-                # 데이터가 존재하면 마지막 행 사용
-                last = df_invest.iloc[-1]
-                frn = int(last.get('Foreign', 0))
-                inst = int(last.get('Institution', 0))
-                data_date = df_invest.index[-1].strftime('%m/%d')
-            else:
-                # 데이터가 비어있으면 0으로 처리 (N/A 방지)
-                frn, inst, data_date = 0, 0, date_str[5:].replace('-', '/')
-            
-            f_icon = "🔵" if frn > 0 else "⚪"
-            i_icon = "🟠" if inst > 0 else "⚪"
-        except:
-            frn, inst, f_icon, i_icon, data_date = 0, 0, "❓", "❓", "ERR"
+            report += f"• <b>{name}</b>\n"
+            report += f"  {price:,}원 ({rate}%) | 시총 {m_cap}조\n"
+            report += f"  PER: {per} | PBR: {pbr}\n"
+        
+        report += "--------------------------------\n"
+        time.sleep(0.1)
 
-        amt_billion = round(row['Amount'] / 100000000) if row['Amount'] else 0
-        report += f"<b>{row['StockName']}</b> ({data_date} 수급)\n"
-        report += f"{int(row['Close']):,}({row['Rate']}%) | {amt_billion}억\n"
-        report += f"{f_icon}외:{frn:,} / {i_icon}기:{inst:,}\n\n"
-        time.sleep(0.2) # API 과부하 방지 (중요)
-
-    report += "--------------------------------\n"
-    if len(sector_rank) > 2:
-        report += f"🥈 2위: {sector_rank.index[1]} | 🥉 3위: {sector_rank.index[2]}"
-    
     send_telegram_msg(report)
+    print("리포트 전송 성공!")
 
 except Exception as e:
-    send_telegram_msg(f"❌ 최종 에러: {str(e)}")
+    print(f"에러: {e}")
+    send_telegram_msg(f"❌ 섹터 리포트 에러: {e}")
